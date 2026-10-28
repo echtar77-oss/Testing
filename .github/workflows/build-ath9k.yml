@@ -1,0 +1,127 @@
+# Save in your repo as:  .github/workflows/build-ath9k.yml
+# Repo files needed in the root: config.txt  ksyms.txt  known_crcs.txt  check_ath9k.py
+# Repo must be PUBLIC (free private runners only have 7 GB RAM, too little).
+# UNTESTED: written without network access. First run may need small fixes.
+name: Build ath9k_htc modules
+
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: "Kernel manifest branch"
+        default: "common-android12-5.10-2025-02"
+      lto:
+        description: "LTO mode (thin uses less RAM; try full if thin fails the check)"
+        type: choice
+        default: thin
+        options: [thin, full]
+      extra_config:
+        description: "Extra scripts/config args, e.g. -e MAC80211_DEBUGFS -d CFG80211_WEXT"
+        default: ""
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 345
+    env:
+      BRANCH: ${{ inputs.branch }}
+      LTO: ${{ inputs.lto }}
+      EXTRA: ${{ inputs.extra_config }}
+      MKARGS: ARCH=arm64 LLVM=1 LLVM_IAS=1 CROSS_COMPILE=aarch64-linux-gnu- CLANG_TRIPLE=aarch64-linux-gnu- HOSTCC=gcc HOSTCXX=g++ HOSTLD=ld
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/share/boost /usr/share/swift
+          sudo docker image prune --all --force || true
+          df -h / | tail -1
+          free -g | head -2
+
+      - name: Install packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bc bison flex libssl-dev libelf-dev cpio rsync zip unzip git curl xz-utils binutils
+
+      - name: Download Android kernel source
+        run: |
+          git config --global user.name ci
+          git config --global user.email ci@example.com
+          git config --global color.ui false
+          mkdir -p ~/bin
+          curl -fsSL https://storage.googleapis.com/git-repo-downloads/repo -o ~/bin/repo
+          chmod +x ~/bin/repo
+          mkdir ack && cd ack
+          ~/bin/repo init --depth=1 --no-clone-bundle -u https://android.googlesource.com/kernel/manifest -b "$BRANCH" </dev/null
+          ~/bin/repo sync -c -j8 --no-tags --no-clone-bundle --force-sync </dev/null
+          CLANG=$(ls -d "$PWD"/prebuilts*/clang/host/linux-x86/clang-r416183b | head -1)
+          if [ ! -x "$CLANG/bin/clang" ]; then
+            echo "clang-r416183b not found. Available:"
+            ls prebuilts*/clang/host/linux-x86
+            exit 1
+          fi
+          echo "CLANG=$CLANG" >> "$GITHUB_ENV"
+          "$CLANG/bin/clang" --version | head -1
+          git -C common log -1 --format='kernel commit %h  %s'
+          df -h / | tail -1
+
+      - name: Configure (start from the tablet's own config)
+        run: |
+          set -e
+          export PATH="$CLANG/bin:$PATH"
+          mkdir -p out
+          cp config.txt out/.config
+          S="ack/common/scripts/config --file out/.config"
+          if [ "$LTO" = thin ]; then $S -d LTO_CLANG_FULL -e LTO_CLANG_THIN; fi
+          $S -d TRIM_UNUSED_KSYMS --set-str UNUSED_KSYMS_WHITELIST "" -d COMPAT_VDSO
+          $S -e WLAN -e WLAN_VENDOR_ATH -m CFG80211 -m MAC80211 -m ATH_COMMON -m ATH_CARDS -m ATH9K_HTC
+          $S -e NL80211_TESTMODE -e CFG80211_CERTIFICATION_ONUS -e CFG80211_REG_CELLULAR_HINTS -e CFG80211_INTERNAL_REGDB -e CFG80211_WEXT
+          $S $EXTRA
+          cd ack/common
+          make O="$GITHUB_WORKSPACE/out" $MKARGS olddefconfig
+          grep -E '^CONFIG_(ATH9K_HTC|ATH_COMMON|CFG80211|MAC80211|CFI_CLANG|LTO_CLANG_(FULL|THIN)|MODVERSIONS|SHADOW_CALL_STACK)=' "$GITHUB_WORKSPACE/out/.config"
+          grep -q '^CONFIG_ATH9K_HTC=m' "$GITHUB_WORKSPACE/out/.config" || { echo "ATH9K_HTC was not enabled"; exit 1; }
+
+      - name: Build kernel and modules (1-2 hours)
+        run: |
+          export PATH="$CLANG/bin:$PATH"
+          cd ack/common
+          make -j"$(nproc)" O="$GITHUB_WORKSPACE/out" $MKARGS modules
+
+      - name: Collect modules and firmware
+        run: |
+          set -e
+          mkdir -p dist/ath9k_htc
+          for m in ath ath9k_hw ath9k_common ath9k_htc; do
+            f=$(find out -name "$m.ko" | head -1)
+            test -n "$f" || { echo "$m.ko was not built"; exit 1; }
+            cp "$f" dist/
+          done
+          "$CLANG/bin/llvm-strip" --strip-debug dist/*.ko
+          cp out/.config dist/kernel.config
+          strings -a dist/ath9k_htc.ko | grep -E 'htc_(9271|7010)' | sort -u | tee dist/firmware_names.txt || true
+          curl -fsSL -o dist/ath9k_htc/htc_9271-1.4.0.fw "https://git.kernel.org/pub/scm/linux/kernel/git/firmware/linux-firmware.git/plain/ath9k_htc/htc_9271-1.4.0.fw" || echo "firmware download failed, fetch it manually"
+          ls -l dist dist/ath9k_htc
+
+      - name: Check against the tablet
+        run: |
+          set +e
+          python3 check_ath9k.py ksyms.txt known_crcs.txt dist/ath.ko dist/ath9k_hw.ko dist/ath9k_common.ko dist/ath9k_htc.ko > dist/check_result.txt 2>&1
+          rc=$?
+          cat dist/check_result.txt
+          {
+            echo "### Check result (LTO=$LTO)"
+            echo '```'
+            cat dist/check_result.txt
+            echo '```'
+            git -C ack/common log -1 --format='kernel commit %h'
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit $rc
+
+      - name: Upload modules
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ath9k-modules
+          path: dist/
+          if-no-files-found: warn
