@@ -10,6 +10,9 @@ on:
       branch:
         description: "Kernel manifest branch"
         default: "common-android12-5.10-2025-02"
+      common_tag:
+        description: "Kernel source tag (r2 = your tablet's exact build, 49c66df526b8)"
+        default: "android12-5.10-2025-02_r2"
       lto:
         description: "LTO mode (thin uses less RAM; try full if thin fails the check)"
         type: choice
@@ -25,6 +28,7 @@ jobs:
     timeout-minutes: 345
     env:
       BRANCH: ${{ inputs.branch }}
+      COMMON_TAG: ${{ inputs.common_tag }}
       LTO: ${{ inputs.lto }}
       EXTRA: ${{ inputs.extra_config }}
       MKARGS: ARCH=arm64 LLVM=1 LLVM_IAS=1 CROSS_COMPILE=aarch64-linux-gnu- CLANG_TRIPLE=aarch64-linux-gnu- HOSTCC=gcc HOSTCXX=g++ HOSTLD=ld
@@ -53,6 +57,16 @@ jobs:
           chmod +x ~/bin/repo
           mkdir ack && cd ack
           ~/bin/repo init --depth=1 --no-clone-bundle -u https://android.googlesource.com/kernel/manifest -b "$BRANCH" </dev/null
+          # The manifest points kernel/common at a branch that no longer exists,
+          # so pin it to the release tag instead.
+          mkdir -p .repo/local_manifests
+          cat > .repo/local_manifests/common.xml <<EOF
+          <manifest>
+          <remove-project name="kernel/common" />
+          <project path="common" name="kernel/common" remote="aosp" revision="refs/tags/$COMMON_TAG" clone-depth="1" />
+          </manifest>
+          EOF
+          cat .repo/local_manifests/common.xml
           ~/bin/repo sync -c -j8 --no-tags --no-clone-bundle --force-sync </dev/null
           CLANG=$(ls -d "$PWD"/prebuilts*/clang/host/linux-x86/clang-r416183b | head -1)
           if [ ! -x "$CLANG/bin/clang" ]; then
