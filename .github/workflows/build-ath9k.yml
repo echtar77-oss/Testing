@@ -90,16 +90,17 @@ jobs:
           if [ "$LTO" = thin ]; then $S -d LTO_CLANG_FULL -e LTO_CLANG_THIN; fi
           $S -d TRIM_UNUSED_KSYMS --set-str UNUSED_KSYMS_WHITELIST "" -d COMPAT_VDSO
           $S -e WLAN -e WLAN_VENDOR_ATH -m CFG80211 -m MAC80211 -m ATH_COMMON -m ATH_CARDS -m ATH9K_HTC
-          # The tablet's cfg80211/mac80211 have no wext, testmode, LED, mesh or debugfs code.
+          # The tablet's cfg80211/mac80211 have testmode but no wext, LED, mesh or debugfs code.
           # ath9k normally force-enables MAC80211_LEDS, so remove that select first.
           sed -i '/select MAC80211_LEDS/d' ack/common/drivers/net/wireless/ath/ath9k/Kconfig
-          $S -d NL80211_TESTMODE -d CFG80211_WEXT -d CFG80211_DEBUGFS -d MAC80211_LEDS -d MAC80211_MESH -d MAC80211_DEBUGFS
+          $S -e NL80211_TESTMODE -d CFG80211_WEXT -d CFG80211_DEBUGFS -d MAC80211_LEDS -d MAC80211_MESH -d MAC80211_DEBUGFS
           if [ -n "${EXTRA// /}" ]; then $S $EXTRA; fi
           cd ack/common
           make O="$GITHUB_WORKSPACE/out" $MKARGS olddefconfig
           grep -E '^CONFIG_(ATH9K_HTC|ATH_COMMON|CFG80211|MAC80211|CFI_CLANG|LTO_CLANG_(FULL|THIN)|MODVERSIONS|SHADOW_CALL_STACK)=' "$GITHUB_WORKSPACE/out/.config"
           grep -q '^CONFIG_ATH9K_HTC=m' "$GITHUB_WORKSPACE/out/.config" || { echo "ATH9K_HTC was not enabled"; exit 1; }
-          for o in NL80211_TESTMODE CFG80211_WEXT CFG80211_DEBUGFS MAC80211_LEDS MAC80211_MESH MAC80211_DEBUGFS; do
+          grep -q '^CONFIG_NL80211_TESTMODE=y' "$GITHUB_WORKSPACE/out/.config" || { echo "NL80211_TESTMODE is not enabled"; exit 1; }
+          for o in CFG80211_WEXT CFG80211_DEBUGFS MAC80211_LEDS MAC80211_MESH MAC80211_DEBUGFS; do
             if grep -q "^CONFIG_$o=" "$GITHUB_WORKSPACE/out/.config"; then echo "$o is still enabled (something selects it)"; exit 1; fi
           done
 
