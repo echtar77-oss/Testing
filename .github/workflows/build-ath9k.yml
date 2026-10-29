@@ -89,14 +89,18 @@ jobs:
           if [ "$LTO" = thin ]; then $S -d LTO_CLANG_FULL -e LTO_CLANG_THIN; fi
           $S -d TRIM_UNUSED_KSYMS --set-str UNUSED_KSYMS_WHITELIST "" -d COMPAT_VDSO
           $S -e WLAN -e WLAN_VENDOR_ATH -m CFG80211 -m MAC80211 -m ATH_COMMON -m ATH_CARDS -m ATH9K_HTC
-          $S -e NL80211_TESTMODE -e CFG80211_CERTIFICATION_ONUS -e CFG80211_REG_CELLULAR_HINTS -e CFG80211_INTERNAL_REGDB -e CFG80211_WEXT
-          if [ -n "$EXTRA" ]; then
+          # The tablet's cfg80211/mac80211 have no wext, testmode, LED, mesh or debugfs code.
+          # ath9k normally force-enables MAC80211_LEDS, so remove that select first.
+          sed -i '/select MAC80211_LEDS/d' ack/common/drivers/net/wireless/ath/ath9k/Kconfig
+          $S -d NL80211_TESTMODE -d CFG80211_WEXT -d CFG80211_DEBUGFS -d MAC80211_LEDS -d MAC80211_MESH -d MAC80211_DEBUGFS
           $S $EXTRA
-          fi
           cd ack/common
           make O="$GITHUB_WORKSPACE/out" $MKARGS olddefconfig
           grep -E '^CONFIG_(ATH9K_HTC|ATH_COMMON|CFG80211|MAC80211|CFI_CLANG|LTO_CLANG_(FULL|THIN)|MODVERSIONS|SHADOW_CALL_STACK)=' "$GITHUB_WORKSPACE/out/.config"
           grep -q '^CONFIG_ATH9K_HTC=m' "$GITHUB_WORKSPACE/out/.config" || { echo "ATH9K_HTC was not enabled"; exit 1; }
+          for o in NL80211_TESTMODE CFG80211_WEXT CFG80211_DEBUGFS MAC80211_LEDS MAC80211_MESH MAC80211_DEBUGFS; do
+            if grep -q "^CONFIG_$o=" "$GITHUB_WORKSPACE/out/.config"; then echo "$o is still enabled (something selects it)"; exit 1; fi
+          done
 
       - name: Build kernel and modules (1-2 hours)
         run: |
@@ -113,7 +117,12 @@ jobs:
             test -n "$f" || { echo "$m.ko was not built"; exit 1; }
             cp "$f" dist/
           done
-          "$CLANG/bin/llvm-strip" --strip-debug dist/*.ko
+          mkdir -p dist/compare_only
+          for m in cfg80211 mac80211; do
+            f=$(find out -name "$m.ko" | head -1)
+            test -n "$f" && cp "$f" dist/compare_only/
+          done
+          "$CLANG/bin/llvm-strip" --strip-debug dist/*.ko dist/compare_only/*.ko
           cp out/.config dist/kernel.config
           strings -a dist/ath9k_htc.ko | grep -E 'htc_(9271|7010)' | sort -u | tee dist/firmware_names.txt || true
           curl -fsSL -o dist/ath9k_htc/htc_9271-1.4.0.fw "https://git.kernel.org/pub/scm/linux/kernel/git/firmware/linux-firmware.git/plain/ath9k_htc/htc_9271-1.4.0.fw" || echo "firmware download failed, fetch it manually"
@@ -124,6 +133,37 @@ jobs:
           set +e
           python3 check_ath9k.py ksyms.txt known_crcs.txt dist/ath.ko dist/ath9k_hw.ko dist/ath9k_common.ko dist/ath9k_htc.ko > dist/check_result.txt 2>&1
           rc=$?
+          python3 - >> dist/check_result.txt 2>&1 <<'PY'
+          import struct
+          def exports(path):
+              d = open(path, 'rb').read()
+              shoff = struct.unpack('<Q', d[0x28:0x30])[0]
+              ent, num, _ = struct.unpack('<HHH', d[0x3A:0x40])
+              secs = [struct.unpack('<IIQQQQIIQQ', d[shoff+i*ent:shoff+i*ent+64]) for i in range(num)]
+              out = {}
+              for n, t, f, a, off, size, link, info, al, es in secs:
+                  if t == 2:
+                      so = secs[link][4]
+                      for k in range(1, size // 24):
+                          nm, inf, oth, sh, val, sz = struct.unpack('<IBBHQQ', d[off+k*24:off+k*24+24])
+                          s = d[so+nm:d.index(b'\0', so+nm)].decode()
+                          if s.startswith('__crc_'):
+                              out[s[6:]] = val & 0xffffffff
+              return out
+          known = {}
+          for l in open('known_crcs.txt'):
+              p = l.split()
+              if len(p) == 2:
+                  known[p[0]] = int(p[1], 16)
+          print()
+          print('Our cfg80211/mac80211 exports vs the tablet (diagnostic only):')
+          for m in ('cfg80211', 'mac80211'):
+              e = exports('dist/compare_only/%s.ko' % m)
+              bad = sorted(s for s, c in e.items() if s in known and known[s] != c)
+              print('%s: %d exports, %d differ from the tablet' % (m, len(e), len(bad)))
+              for s in bad[:40]:
+                  print('   EXPORT DIFFERS:', s)
+          PY
           cat dist/check_result.txt
           {
             echo "### Check result (LTO=$LTO)"
