@@ -81,7 +81,8 @@ jobs:
 
       - name: Configure (start from the tablet's own config)
         run: |
-          set -e
+          set -ex
+          echo "EXTRA=[$EXTRA] LTO=[$LTO]"
           export PATH="$CLANG/bin:$PATH"
           mkdir -p out
           cp config.txt out/.config
@@ -93,7 +94,7 @@ jobs:
           # ath9k normally force-enables MAC80211_LEDS, so remove that select first.
           sed -i '/select MAC80211_LEDS/d' ack/common/drivers/net/wireless/ath/ath9k/Kconfig
           $S -d NL80211_TESTMODE -d CFG80211_WEXT -d CFG80211_DEBUGFS -d MAC80211_LEDS -d MAC80211_MESH -d MAC80211_DEBUGFS
-          $S $EXTRA
+          if [ -n "${EXTRA// /}" ]; then $S $EXTRA; fi
           cd ack/common
           make O="$GITHUB_WORKSPACE/out" $MKARGS olddefconfig
           grep -E '^CONFIG_(ATH9K_HTC|ATH_COMMON|CFG80211|MAC80211|CFI_CLANG|LTO_CLANG_(FULL|THIN)|MODVERSIONS|SHADOW_CALL_STACK)=' "$GITHUB_WORKSPACE/out/.config"
