@@ -89,7 +89,7 @@ jobs:
           if [ "$LTO" = thin ]; then $S -d LTO_CLANG_FULL -e LTO_CLANG_THIN; fi
           $S -d TRIM_UNUSED_KSYMS --set-str UNUSED_KSYMS_WHITELIST "" -d COMPAT_VDSO
           $S -e WLAN -e WLAN_VENDOR_MEDIATEK -m CFG80211 -m MAC80211 -m MT7601U
-          $S -d CFG80211_CERTIFICATION_ONUS -d CFG80211_REG_CELLULAR_HINTS -d CFG80211_WEXT
+          $S -e NL80211_TESTMODE -d CFG80211_CERTIFICATION_ONUS -d CFG80211_REG_CELLULAR_HINTS -d CFG80211_WEXT
           if [ -n "$EXTRA" ]; then
             # Split optional command-line arguments into separate words.
             $S $EXTRA
@@ -98,6 +98,7 @@ jobs:
           make O="$GITHUB_WORKSPACE/out" $MKARGS olddefconfig
           grep -E '^CONFIG_(MT7601U|WLAN_VENDOR_MEDIATEK|CFG80211|MAC80211|CFI_CLANG|LTO_CLANG_(FULL|THIN)|MODVERSIONS|SHADOW_CALL_STACK)=' "$GITHUB_WORKSPACE/out/.config"
           grep -q '^CONFIG_MT7601U=m' "$GITHUB_WORKSPACE/out/.config" || { echo "MT7601U was not enabled"; exit 1; }
+          grep -q '^CONFIG_NL80211_TESTMODE=y' "$GITHUB_WORKSPACE/out/.config" || { echo "NL80211_TESTMODE was not enabled"; exit 1; }
 
       - name: Patch optional MT7601U firmware cache call
         run: |
