@@ -99,6 +99,25 @@ jobs:
           grep -E '^CONFIG_(MT7601U|WLAN_VENDOR_MEDIATEK|CFG80211|MAC80211|CFI_CLANG|LTO_CLANG_(FULL|THIN)|MODVERSIONS|SHADOW_CALL_STACK)=' "$GITHUB_WORKSPACE/out/.config"
           grep -q '^CONFIG_MT7601U=m' "$GITHUB_WORKSPACE/out/.config" || { echo "MT7601U was not enabled"; exit 1; }
 
+      - name: Patch optional MT7601U firmware cache call
+        run: |
+          set -e
+          python3 - <<'PYCODE'
+          from pathlib import Path
+          root = Path('ack/common/drivers/net/wireless/mediatek/mt7601u')
+          files = list(root.glob('*.c'))
+          matches = [p for p in files if 'firmware_request_cache(' in p.read_text()]
+          if len(matches) != 1:
+              raise SystemExit(f'Expected exactly one MT7601U firmware cache source, found {matches}')
+          p = matches[0]
+          source = p.read_text()
+          # Cache prefetch is optional. A no-op macro avoids importing a symbol
+          # absent from the tablet kernel while retaining normal firmware loading.
+          marker = '#define firmware_request_cache(...) (0)\n'
+          p.write_text(marker + source)
+          print(f'Patched optional cache operation in {p}')
+          PYCODE
+
       - name: Build kernel and modules (1-2 hours)
         run: |
           export PATH="$CLANG/bin:$PATH"
@@ -114,7 +133,9 @@ jobs:
           cp "$f" dist/mt7601u.ko
           "$CLANG/bin/llvm-strip" --strip-debug dist/mt7601u.ko
           cp out/.config dist/kernel.config
-          curl -fsSL -o dist/mediatek/mt7601u.bin "https://raw.githubusercontent.com/linux-firmware/linux-firmware/main/mediatek/mt7601u.bin"
+          # Download firmware from the upstream linux-firmware repository.
+          curl -fL --retry 3 -o dist/mediatek/mt7601u.bin "https://git.kernel.org/pub/scm/linux/kernel/git/firmware/linux-firmware.git/plain/mediatek/mt7601u.bin"
+          test "$(wc -c < dist/mediatek/mt7601u.bin)" -gt 1000 || { echo "Firmware download looks invalid"; exit 1; }
           ls -l dist dist/mediatek
 
       - name: Check against tablet exports and known CRCs
