@@ -104,18 +104,24 @@ jobs:
           set -e
           python3 - <<'PYCODE'
           from pathlib import Path
+          import re
           root = Path('ack/common/drivers/net/wireless/mediatek/mt7601u')
-          files = list(root.glob('*.c'))
-          matches = [p for p in files if 'firmware_request_cache(' in p.read_text()]
+          matches = []
+          for p in root.glob('*.c'):
+              source = p.read_text()
+              if 'firmware_request_cache(' in source:
+                  matches.append((p, source))
           if len(matches) != 1:
-              raise SystemExit(f'Expected exactly one MT7601U firmware cache source, found {matches}')
-          p = matches[0]
-          source = p.read_text()
-          # Cache prefetch is optional. A no-op macro avoids importing a symbol
-          # absent from the tablet kernel while retaining normal firmware loading.
-          marker = '#define firmware_request_cache(...) (0)\n'
-          p.write_text(marker + source)
-          print(f'Patched optional cache operation in {p}')
+              raise SystemExit(f'Expected exactly one source containing the cache call; found {len(matches)}')
+          p, source = matches[0]
+          # Replace only the call expression, not the function declaration in
+          # linux/firmware.h. The cache prefetch is optional; firmware loading
+          # through request_firmware() is unchanged.
+          patched, count = re.subn(r'\bfirmware_request_cache\s*\([^;]*?\)', '0', source)
+          if count != 1:
+              raise SystemExit(f'Expected exactly one cache call; found {count}')
+          p.write_text(patched)
+          print(f'Replaced optional firmware cache call in {p}')
           PYCODE
 
       - name: Build kernel and modules (1-2 hours)
